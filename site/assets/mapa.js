@@ -10,9 +10,9 @@ const records=DATA.rows.map(r=>({...r,corridor:r.corridor||'Sem logradouro infor
 let state={ap:0,corridor:'',quality:'',section:'',query:'',types:new Set(Object.keys(TYPES)),page:0},filtered=[],markers=new Map(),apLayers=new Map();
 const sourceFor=r=>r.lote===1?'https://api.mziq.com/mzfilemanager/v2/d/31984144-b5d8-42f6-b944-26345a820727/45c341ca-8888-991e-a285-f7679928157d?origin=2':'https://api.mziq.com/mzfilemanager/v2/d/31984144-b5d8-42f6-b944-26345a820727/c105247f-436b-beee-c345-148867e21eea?origin=2';
 const map=L.map('map',{preferCanvas:true,minZoom:9,maxZoom:19,zoomControl:true,zoomAnimation:false,fadeAnimation:false,markerZoomAnimation:false}).setView([-22.90,-43.42],10);
-function addBasemap() {
-  const pane = map.createPane('basemap');
-  pane.style.zIndex = '210';
+async function addBasemap() {
+  const pane = map.createPane('street-fallback');
+  pane.style.zIndex = '190';
   const status = $('tile-status');
   let streets;
 
@@ -22,7 +22,7 @@ function addBasemap() {
         route.lines.map(line => line.map(([lng, lat]) => [lat, lng]))
       );
       streets = L.polyline(lines, {
-        pane: 'basemap', interactive: false, color: '#809398', weight: 1, opacity: 0.65,
+        pane: 'street-fallback', interactive: false, color: '#809398', weight: 1, opacity: 0.65,
         attribution: '<a href="https://pgeo3.rio.rj.gov.br/arcgis/rest/services/CadLog/Trechos_Logradouros/MapServer/0">Prefeitura do Rio · CadLog</a>'
       });
     }
@@ -31,53 +31,64 @@ function addBasemap() {
     status.style.display = visible ? 'block' : 'none';
   }
 
-  if (!window.MaplibreGLLeaflet) {
+  if (!window.protomapsL) {
     setFallback(true);
     return;
   }
 
-  const BasemapLayer = window.MaplibreGLLeaflet.MaplibreGL.extend({
-    onRemove(leafletMap) {
-      if (this.getMaplibreMap()) {
-        window.MaplibreGLLeaflet.MaplibreGL.prototype.onRemove.call(this, leafletMap);
-      } else {
-        this.getContainer()?.remove();
-      }
-    }
-  });
-  const layer = new BasemapLayer({
-    style: 'https://tiles.openfreemap.org/styles/positron',
-    attributionControl: {
-      customAttribution: '<a href="https://openfreemap.org/">OpenFreeMap</a> · © <a href="https://openmaptiles.org/">OpenMapTiles</a> · © <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
-    }
-  });
   try {
+    const response = await fetch('https://tiles.openfreemap.org/planet', {
+      signal: AbortSignal.timeout(8000)
+    });
+    if (!response.ok) throw new Error('Falha ao consultar a fonte do mapa-base.');
+    const metadata = await response.json();
+    const {leafletLayer, PolygonSymbolizer, LineSymbolizer, CenteredTextSymbolizer, LineLabelSymbolizer} = window.protomapsL;
+    const majorRoads = new Set(['motorway', 'trunk', 'primary', 'secondary', 'tertiary']);
+    const labelStyle = {labelProps: ['name:pt', 'name'], fill: '#465b61', stroke: '#f6f8f7', width: 2};
+    const layer = leafletLayer({
+      url: metadata.tiles[0],
+      maxDataZoom: metadata.maxzoom,
+      attribution: '<a href="https://openfreemap.org/">OpenFreeMap</a> · © <a href="https://openmaptiles.org/">OpenMapTiles</a> · © <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
+      paintRules: [
+        {dataLayer: 'landcover', symbolizer: new PolygonSymbolizer({fill: '#e2ecd9'})},
+        {dataLayer: 'park', symbolizer: new PolygonSymbolizer({fill: '#dce9d5'})},
+        {dataLayer: 'water', symbolizer: new PolygonSymbolizer({fill: '#bad9e5'})},
+        {dataLayer: 'waterway', minzoom: 12, symbolizer: new LineSymbolizer({color: '#a8cbd9', width: 1.5})},
+        {dataLayer: 'building', minzoom: 15, symbolizer: new PolygonSymbolizer({fill: '#dce2df'})},
+        {dataLayer: 'transportation', minzoom: 12, symbolizer: new LineSymbolizer({color: '#fbfcfa', width: z => z < 15 ? 1 : 2})},
+        {dataLayer: 'transportation', filter: (_, feature) => majorRoads.has(feature.props.class),
+          symbolizer: new LineSymbolizer({color: '#cbb691', width: z => z < 12 ? 1.3 : 2.5})}
+      ],
+      labelRules: [
+        {dataLayer: 'place', symbolizer: new CenteredTextSymbolizer({...labelStyle, font: '600 12px sans-serif'})},
+        {dataLayer: 'transportation_name', minzoom: 13,
+          symbolizer: new LineLabelSymbolizer({...labelStyle, font: '11px sans-serif', repeatDistance: 240})}
+      ]
+    });
+
+    // Empty or failed tiles remain transparent over the municipal street layer.
+    let hasDrawnTile = false;
+    let loadingTimer;
+    const startLoading = () => {
+      hasDrawnTile = false;
+      clearTimeout(loadingTimer);
+      loadingTimer = setTimeout(() => setFallback(true), 8000);
+    };
+    layer.on('loading', startLoading);
+    layer.on('tileload', ({tile}) => {
+      if (hasDrawnTile) return;
+      const pixels = tile.getContext('2d').getImageData(0, 0, tile.width, tile.height).data;
+      hasDrawnTile = pixels.some((value, index) => index % 4 === 3 && value !== 0);
+    });
+    layer.on('load', () => {
+      clearTimeout(loadingTimer);
+      setFallback(!hasDrawnTile);
+    });
     layer.addTo(map);
   } catch (error) {
-    layer.remove();
     setFallback(true);
-    console.warn('Falha ao iniciar o mapa-base.', error);
-    return;
+    console.warn('Falha ao carregar o mapa-base.', error);
   }
-
-  const basemap = layer.getMaplibreMap();
-  const container = layer.getContainer();
-  const showFallback = () => {
-    container.style.visibility = 'hidden';
-    setFallback(true);
-  };
-  const fallbackTimer = setTimeout(showFallback, 12000);
-  basemap.on('error', showFallback);
-  basemap.on('webglcontextlost', showFallback);
-  basemap.on('idle', () => {
-    const streetLayers = basemap.getStyle().layers
-      .filter(styleLayer => styleLayer['source-layer'] === 'transportation' && styleLayer.type === 'line')
-      .map(styleLayer => styleLayer.id);
-    if (!streetLayers.length || !basemap.queryRenderedFeatures({layers: streetLayers}).length) return;
-    clearTimeout(fallbackTimer);
-    setFallback(false);
-    container.style.visibility = '';
-  });
 }
 L.control.scale({imperial:false,maxWidth:120}).addTo(map);
 const apGroup=L.geoJSON(DATA.aps,{style:f=>({color:'#527e87',weight:1.5,fillColor:'#a8c9ca',fillOpacity:.05,dashArray:'5 5'}),onEachFeature:(f,l)=>{const ap=+f.properties.codapnum;apLayers.set(ap,l);l.bindTooltip('AP '+ap,{className:'ap-label',permanent:false});l.on('click',()=>setAP(ap));}}).addTo(map);
