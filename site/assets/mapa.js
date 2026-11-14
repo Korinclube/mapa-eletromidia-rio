@@ -10,8 +10,75 @@ const records=DATA.rows.map(r=>({...r,corridor:r.corridor||'Sem logradouro infor
 let state={ap:0,corridor:'',quality:'',section:'',query:'',types:new Set(Object.keys(TYPES)),page:0},filtered=[],markers=new Map(),apLayers=new Map();
 const sourceFor=r=>r.lote===1?'https://api.mziq.com/mzfilemanager/v2/d/31984144-b5d8-42f6-b944-26345a820727/45c341ca-8888-991e-a285-f7679928157d?origin=2':'https://api.mziq.com/mzfilemanager/v2/d/31984144-b5d8-42f6-b944-26345a820727/c105247f-436b-beee-c345-148867e21eea?origin=2';
 const map=L.map('map',{preferCanvas:true,minZoom:9,maxZoom:19,zoomControl:true,zoomAnimation:false,fadeAnimation:false,markerZoomAnimation:false}).setView([-22.90,-43.42],10);
-const tile=L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'}).addTo(map);
-tile.on('tileerror',()=>{$('tile-status').style.display='block';});tile.on('tileload',()=>{$('tile-status').style.display='none';});
+function addBasemap() {
+  const pane = map.createPane('basemap');
+  pane.style.zIndex = '210';
+  const status = $('tile-status');
+  let streets;
+
+  function setFallback(visible) {
+    if (visible && !streets) {
+      const lines = Object.values(DATA.routes).flatMap(route =>
+        route.lines.map(line => line.map(([lng, lat]) => [lat, lng]))
+      );
+      streets = L.polyline(lines, {
+        pane: 'basemap', interactive: false, color: '#809398', weight: 1, opacity: 0.65,
+        attribution: '<a href="https://pgeo3.rio.rj.gov.br/arcgis/rest/services/CadLog/Trechos_Logradouros/MapServer/0">Prefeitura do Rio · CadLog</a>'
+      });
+    }
+    if (visible) streets.addTo(map);
+    else streets?.remove();
+    status.style.display = visible ? 'block' : 'none';
+  }
+
+  if (!window.MaplibreGLLeaflet) {
+    setFallback(true);
+    return;
+  }
+
+  const BasemapLayer = window.MaplibreGLLeaflet.MaplibreGL.extend({
+    onRemove(leafletMap) {
+      if (this.getMaplibreMap()) {
+        window.MaplibreGLLeaflet.MaplibreGL.prototype.onRemove.call(this, leafletMap);
+      } else {
+        this.getContainer()?.remove();
+      }
+    }
+  });
+  const layer = new BasemapLayer({
+    style: 'https://tiles.openfreemap.org/styles/positron',
+    attributionControl: {
+      customAttribution: '<a href="https://openfreemap.org/">OpenFreeMap</a> · © <a href="https://openmaptiles.org/">OpenMapTiles</a> · © <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
+    }
+  });
+  try {
+    layer.addTo(map);
+  } catch (error) {
+    layer.remove();
+    setFallback(true);
+    console.warn('Falha ao iniciar o mapa-base.', error);
+    return;
+  }
+
+  const basemap = layer.getMaplibreMap();
+  const container = layer.getContainer();
+  const showFallback = () => {
+    container.style.visibility = 'hidden';
+    setFallback(true);
+  };
+  const fallbackTimer = setTimeout(showFallback, 12000);
+  basemap.on('error', showFallback);
+  basemap.on('webglcontextlost', showFallback);
+  basemap.on('idle', () => {
+    const streetLayers = basemap.getStyle().layers
+      .filter(styleLayer => styleLayer['source-layer'] === 'transportation' && styleLayer.type === 'line')
+      .map(styleLayer => styleLayer.id);
+    if (!streetLayers.length || !basemap.queryRenderedFeatures({layers: streetLayers}).length) return;
+    clearTimeout(fallbackTimer);
+    setFallback(false);
+    container.style.visibility = '';
+  });
+}
 L.control.scale({imperial:false,maxWidth:120}).addTo(map);
 const apGroup=L.geoJSON(DATA.aps,{style:f=>({color:'#527e87',weight:1.5,fillColor:'#a8c9ca',fillOpacity:.05,dashArray:'5 5'}),onEachFeature:(f,l)=>{const ap=+f.properties.codapnum;apLayers.set(ap,l);l.bindTooltip('AP '+ap,{className:'ap-label',permanent:false});l.on('click',()=>setAP(ap));}}).addTo(map);
 const selectionLayer=L.layerGroup().addTo(map),corridorLayer=L.layerGroup().addTo(map);
@@ -44,3 +111,5 @@ $('method-button').onclick=()=>{$('methods').open=true;$('methods').scrollIntoVi
 $('method-stats').innerHTML=['porta','numero','cruzamento','via','pendente'].map(m=>'<tr><td>'+METHODS[m]+'</td><td>'+fmt(DATA.stats.methods[m]||0)+'</td></tr>').join('');
 window.__mapTest={data:DATA,getFiltered:()=>filtered,state:()=>state,map,markers,exportRecords,setAP};
 updateCorridors();render(true);
+
+addBasemap();
